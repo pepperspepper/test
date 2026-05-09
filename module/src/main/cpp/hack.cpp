@@ -16,12 +16,20 @@
 #include <sys/mman.h>
 #include <linux/unistd.h>
 #include <array>
+#include <vector>
+#include <string>
 
-void hack_start(const char *game_data_dir) {
+void hack_start(const char *game_data_dir, int target_pid) {
     bool load = false;
-    for (int i = 0; i < 10; i++) {
-        void *handle = xdl_open("libil2cpp.so", 0);
-        if (handle) {
+
+    target_pid = target_pid == 0 ? gettid() : target_pid;
+    
+    LOGD("Starting scan for libil2cpp.so");
+
+    for (int i = 0; i < 1; i++) {
+        void *handle = xdl_open("libil2cpp.so\0", 0, target_pid);
+        
+        if (handle != nullptr) {
             load = true;
             il2cpp_api_init(handle);
             il2cpp_dump(game_data_dir);
@@ -31,14 +39,21 @@ void hack_start(const char *game_data_dir) {
         }
     }
     if (!load) {
-        LOGI("libil2cpp.so not found in thread %d", gettid());
+        LOGI("libil2cpp.so not found in thread %d", target_pid);
     }
 }
 
 std::string GetLibDir(JavaVM *vms) {
+    LOGD("GetLibDir called");
+
     JNIEnv *env = nullptr;
+
     vms->AttachCurrentThread(&env, nullptr);
+    
+    LOGD("Attached to Thread");
+
     jclass activity_thread_clz = env->FindClass("android/app/ActivityThread");
+
     if (activity_thread_clz != nullptr) {
         jmethodID currentApplicationId = env->GetStaticMethodID(activity_thread_clz,
                                                                 "currentApplication",
@@ -111,18 +126,71 @@ struct NativeBridgeCallbacks {
     void *(*loadLibraryExt)(const char *libpath, int flag, void *ns);
 };
 
+void* NativeApexARTLoad(){
+    std::string apex_art_path = (sizeof(void*) == 4) ? "/apex/com.android.art/lib/" : "/apex/com.android.art/lib64/";
+
+    std::vector<std::string> libraries = {
+        "libartpalette.so",
+        "libartbase.so",
+        "libnativebridge.so",
+        "libdexfile.so",
+        "libprofile.so",
+        "libart.so", // last value must be libart.so so 'lib_handler' references it after the 'for' loop.
+    };
+
+    void* lib_handler;
+    std::string lib_path;
+    
+    for(std::string lib_name : libraries){
+        lib_path = apex_art_path + lib_name;
+
+        lib_handler = dlopen(lib_path.c_str(), RTLD_NOW);
+
+        if(lib_handler == nullptr){
+            LOGE("Failed to include %s library. Error: %s.", lib_path.c_str(), dlerror());
+            
+            return nullptr;
+        }else{
+            LOGE("Library loaded %s located in %p", lib_path.c_str(), lib_handler);
+        }
+    }
+ 
+    return lib_handler;
+}
+
 bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size_t length) {
     //TODO 等待houdini初始化
+    LOGI("Waiting 5s to be ready");
     sleep(5);
 
-    auto libart = dlopen("libart.so", RTLD_NOW);
-    auto JNI_GetCreatedJavaVMs = (jint (*)(JavaVM **, jsize, jsize *)) dlsym(libart,
-                                                                             "JNI_GetCreatedJavaVMs");
+    void* runtime_lib = dlopen("libart.so", RTLD_NOW);
+    
+    LOGI("libart.so %p", runtime_lib);
+
+    if(runtime_lib == nullptr){
+        LOGE("Failed to open ART library. Error: %s.\n Trying to open in apex", dlerror());
+
+        if((runtime_lib = NativeApexARTLoad()) == nullptr){
+            LOGE("Failed to include Apex ART libraries.");
+
+            return false;
+        }
+    }
+
+    LOGI("apex libart.so %p", runtime_lib);
+
+    auto JNI_GetCreatedJavaVMs = (jint (*)(JavaVM **, jsize, jsize *)) dlsym(runtime_lib, "JNI_GetCreatedJavaVMs");
+    
     LOGI("JNI_GetCreatedJavaVMs %p", JNI_GetCreatedJavaVMs);
+
     JavaVM *vms_buf[1];
     JavaVM *vms;
     jsize num_vms;
+
     jint status = JNI_GetCreatedJavaVMs(vms_buf, 1, &num_vms);
+
+    LOGD("JNI_GetCreatedJavaVMs status: %d | num_vms: %d | vms: %p", status, num_vms, vms_buf[0]);
+
     if (status == JNI_OK && num_vms > 0) {
         vms = vms_buf[0];
     } else {
@@ -186,7 +254,7 @@ bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size
     return false;
 }
 
-void hack_prepare(const char *game_data_dir, void *data, size_t length) {
+void hack_prepare(const char *game_data_dir, void *data, int target_pid, size_t length) {
     LOGI("hack thread: %d", gettid());
     int api_level = android_get_device_api_level();
     LOGI("api level: %d", api_level);
@@ -194,7 +262,7 @@ void hack_prepare(const char *game_data_dir, void *data, size_t length) {
 #if defined(__i386__) || defined(__x86_64__)
     if (!NativeBridgeLoad(game_data_dir, api_level, data, length)) {
 #endif
-        hack_start(game_data_dir);
+        hack_start(game_data_dir, target_pid);
 #if defined(__i386__) || defined(__x86_64__)
     }
 #endif
@@ -203,9 +271,13 @@ void hack_prepare(const char *game_data_dir, void *data, size_t length) {
 #if defined(__arm__) || defined(__aarch64__)
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    // TODO: Add target pid here
+    
     auto game_data_dir = (const char *) reserved;
-    std::thread hack_thread(hack_start, game_data_dir);
+
+    std::thread hack_thread(hack_start, game_data_dir, 0);
     hack_thread.detach();
+
     return JNI_VERSION_1_6;
 }
 

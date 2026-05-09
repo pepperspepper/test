@@ -322,14 +322,19 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
+void set_il2cpp_base(void* addr){
+    il2cpp_base = (uint64_t)addr;
+}
+
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
+
     init_il2cpp_api(handle);
     if (il2cpp_domain_get_assemblies) {
         Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
+        //if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
+        //    il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
+        //}
         LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
     } else {
         LOGE("Failed to initialize il2cpp api.");

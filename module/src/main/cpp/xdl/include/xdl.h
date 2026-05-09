@@ -62,7 +62,7 @@ typedef struct {
 //
 #define XDL_TRY_FORCE_LOAD    0x01
 #define XDL_ALWAYS_FORCE_LOAD 0x02
-void *xdl_open(const char *filename, int flags);
+void *xdl_open(const char *filename, int flags, int target_pid);
 void *xdl_close(void *handle);
 void *xdl_sym(void *handle, const char *symbol, size_t *symbol_size);
 void *xdl_dsym(void *handle, const char *symbol, size_t *symbol_size);

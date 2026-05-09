@@ -30,9 +30,16 @@ public:
         env->ReleaseStringUTFChars(args->app_data_dir, app_data_dir);
     }
 
-    void postAppSpecialize(const AppSpecializeArgs *) override {
+    void postAppSpecialize(const AppSpecializeArgs *args) override {
         if (enable_hack) {
-            std::thread hack_thread(hack_prepare, game_data_dir, data, length);
+            auto package_name = env->GetStringUTFChars(args->nice_name, nullptr);
+
+            LOGI("Game uid: %d", args->uid);
+            LOGI("Game gid: %d", args->gid);
+            LOGI("Process pid: %d", gettid());
+            LOGI("Process name: %s", package_name);
+
+            std::thread hack_thread(hack_prepare, game_data_dir, data, gettid(), length);
             hack_thread.detach();
         }
     }
@@ -48,6 +55,7 @@ private:
     void preSpecialize(const char *package_name, const char *app_data_dir) {
         if (strcmp(package_name, GamePackageName) == 0) {
             LOGI("detect game: %s", package_name);
+
             enable_hack = true;
             game_data_dir = new char[strlen(app_data_dir) + 1];
             strcpy(game_data_dir, app_data_dir);
@@ -58,6 +66,7 @@ private:
 #if defined(__x86_64__)
             auto path = "zygisk/arm64-v8a.so";
 #endif
+
 #if defined(__i386__) || defined(__x86_64__)
             int dirfd = api->getModuleDir();
             int fd = openat(dirfd, path, O_RDONLY);

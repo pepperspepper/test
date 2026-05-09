@@ -33,9 +33,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
-
+#include "../log.h"
 #include "xdl.h"
 #include "xdl_linker.h"
 #include "xdl_util.h"
@@ -180,6 +181,8 @@ static int xdl_iterate_do_callback(xdl_iterate_phdr_cb_t cb, void *cb_arg, uintp
 }
 
 static int xdl_iterate_by_linker(xdl_iterate_phdr_cb_t cb, void *cb_arg, int flags) {
+  LOGD("Scanning maps by linker");
+
   if (NULL == dl_iterate_phdr) return 0;
 
   int api_level = xdl_util_get_api_level();
@@ -206,87 +209,81 @@ static int xdl_iterate_by_linker(xdl_iterate_phdr_cb_t cb, void *cb_arg, int fla
   return r;
 }
 
-#if (defined(__arm__) || defined(__i386__)) && __ANDROID_API__ < __ANDROID_API_L__
+//#if (defined(__arm__) || defined(__i386__)) && __ANDROID_API__ < __ANDROID_API_L__
 static int xdl_iterate_by_maps(xdl_iterate_phdr_cb_t cb, void *cb_arg) {
-  FILE *maps = fopen("/proc/self/maps", "r");
+  LOGD("Scanning maps in raw way");
+
+  uintptr_t* args = (uintptr_t*)cb_arg;
+  char* target_libname = (char*)(*(args+1));
+  
+  uintptr_t* target_pid_addr = (uintptr_t*)(*(args+2));
+  int target_pid = target_pid_addr == 0 ? 0 : *target_pid_addr;
+  char pid_str[16] = {0};
+  
+  sprintf(pid_str, "%d", target_pid);
+
+  char maps_path[128] = {0};
+  strcpy(maps_path, "/proc/");
+  strcat(maps_path, target_pid_addr > 0 ? pid_str : "self");
+  strcat(maps_path, "/maps");
+
+  LOGD("Targetting path %s to look for %s", maps_path, target_libname);
+
+  FILE *maps = fopen(maps_path, "r");
+
   if (NULL == maps) return 0;
 
   int r = 0;
-  char buf1[1024], buf2[1024];
+  char buf1[1024]={0}, buf2[1024]={0};
   char *line = buf1;
   uintptr_t prev_base = 0;
   bool try_next_line = false;
 
   while (fgets(line, sizeof(buf1), maps)) {
     // Try to find an ELF which loaded by linker.
+    
     uintptr_t base, offset;
     char exec;
-    if (3 != sscanf(line, "%" SCNxPTR "-%*" SCNxPTR " r%*c%cp %" SCNxPTR " ", &base, &exec, &offset)) goto clean;
+    if (3 != sscanf(line, "%" SCNxPTR "-%*" SCNxPTR " r%*c%cp %" SCNxPTR " ", &base, &exec, &offset)) continue;
 
-    if ('-' == exec && 0 == offset) {
-      // r--p
-      prev_base = base;
-      line = (line == buf1 ? buf2 : buf1);
-      try_next_line = true;
-      continue;
-    }
-    else if (exec == 'x') {
-      // r-xp
-      char *pathname = NULL;
-      if (try_next_line && 0 != offset) {
-        char *prev = (line == buf1 ? buf2 : buf1);
-        char *prev_pathname = strchr(prev, '/');
-        if (NULL == prev_pathname) goto clean;
+    char *pathname = strchr(line, '/');
 
-        pathname = strchr(line, '/');
-        if (NULL == pathname) goto clean;
+    if (NULL == pathname) continue;
 
-        xdl_util_trim_ending(prev_pathname);
-        xdl_util_trim_ending(pathname);
-        if (0 != strcmp(prev_pathname, pathname)) goto clean;
+    if (0 == offset) {
+      xdl_util_trim_ending(pathname);
 
-        // we found the line with r-xp in the next line
-        base = prev_base;
-        offset = 0;
-      }
-
-      if (0 != offset) goto clean;
-
-      // get pathname
-      if (NULL == pathname) {
-        pathname = strchr(line, '/');
-        if (NULL == pathname) goto clean;
-        xdl_util_trim_ending(pathname);
-      }
-
-      if (0 != memcmp((void *)base, ELFMAG, SELFMAG)) goto clean;
-      ElfW(Ehdr) *ehdr = (ElfW(Ehdr) *)base;
-      struct dl_phdr_info info;
-      info.dlpi_name = pathname;
-      info.dlpi_phdr = (const ElfW(Phdr) *)(base + ehdr->e_phoff);
-      info.dlpi_phnum = ehdr->e_phnum;
-
-      // callback
-      if (0 != (r = xdl_iterate_do_callback(cb, cb_arg, base, pathname, NULL))) break;
+      if(!(strlen(pathname) > strlen(target_libname) && strcmp(pathname + strlen(pathname) - strlen(target_libname), target_libname) == 0)) continue;
     }
 
- clean:
-    try_next_line = false;
+    if (0 != memcmp((void *)base, ELFMAG, SELFMAG)) continue;
+
+    set_il2cpp_base((void*)base);
+
+    ElfW(Ehdr) *ehdr = (ElfW(Ehdr) *)base;
+    struct dl_phdr_info info;
+    info.dlpi_name = pathname;
+    info.dlpi_phdr = (const ElfW(Phdr) *)(base + ehdr->e_phoff);
+    info.dlpi_phnum = ehdr->e_phnum;
+
+    // callback
+    if (0 != (r = xdl_iterate_do_callback(cb, cb_arg, base, pathname, NULL))) break;
   }
 
   fclose(maps);
   return r;
 }
-#endif
+//#endif
 
 int xdl_iterate_phdr_impl(xdl_iterate_phdr_cb_t cb, void *cb_arg, int flags) {
   // iterate by /proc/self/maps in Android 4.x (Android 4.x only supports arm32 and x86)
-#if (defined(__arm__) || defined(__i386__)) && __ANDROID_API__ < __ANDROID_API_L__
-  if (xdl_util_get_api_level() < __ANDROID_API_L__) return xdl_iterate_by_maps(cb, cb_arg);
-#endif
+//#if (defined(__arm__) || defined(__i386__)) && __ANDROID_API__ < __ANDROID_API_L__
+//  if (xdl_util_get_api_level() < __ANDROID_API_L__) 
+    return xdl_iterate_by_maps(cb, cb_arg);
+//#endif
 
   // iterate by dl_iterate_phdr()
-  return xdl_iterate_by_linker(cb, cb_arg, flags);
+  //return xdl_iterate_by_linker(cb, cb_arg, flags);
 }
 
 int xdl_iterate_get_full_pathname(uintptr_t base, char *buf, size_t buf_len) {

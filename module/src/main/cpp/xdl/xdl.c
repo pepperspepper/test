@@ -40,7 +40,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
+#include "../log.h"
 #include "xdl_iterate.h"
 #include "xdl_linker.h"
 #include "xdl_lzma.h"
@@ -433,6 +433,8 @@ static int xdl_find_iterate_cb(struct dl_phdr_info *info, size_t size, void *arg
   // check load_bias
   if (0 == info->dlpi_addr || NULL == info->dlpi_name) return 0;
 
+  //LOGD("checking module %s", info->dlpi_name);
+
   // check pathname
   if ('[' == filename[0]) {
     if (0 != strcmp(info->dlpi_name, filename)) return 0;
@@ -465,7 +467,7 @@ static int xdl_find_iterate_cb(struct dl_phdr_info *info, size_t size, void *arg
   return 1;  // return OK
 }
 
-static xdl_t *xdl_find(const char *filename) {
+static xdl_t *xdl_find(const char *filename, int target_pid) {
   // from auxv (linker, vDSO)
   xdl_t *self = NULL;
   if (xdl_util_ends_with(filename, XDL_UTIL_LINKER_BASENAME))
@@ -485,23 +487,29 @@ static xdl_t *xdl_find(const char *filename) {
     basename = XDL_UTIL_APP_PROCESS_BASENAME;
     pathname = XDL_UTIL_APP_PROCESS_PATHNAME;
   }
-  if (xdl_util_ends_with(filename, basename)) self = xdl_find_from_auxv(AT_PHDR, pathname);
+
+  if (xdl_util_ends_with(filename, basename))
+    self = xdl_find_from_auxv(AT_PHDR, pathname);
 
   if (NULL != self) return self;
 
+  LOGD("Self still NULL. Trying another method");
+
   // from dl_iterate_phdr
-  uintptr_t pkg[2] = {(uintptr_t)&self, (uintptr_t)filename};
+  uintptr_t pkg[3] = {(uintptr_t)&self, (uintptr_t)filename, (uintptr_t)&target_pid};
+
   xdl_iterate_phdr(xdl_find_iterate_cb, pkg, XDL_DEFAULT);
+
   return self;
 }
 
-static void *xdl_open_always_force(const char *filename) {
+static void *xdl_open_always_force(const char *filename, int target_pid) {
   // always force dlopen()
   void *linker_handle = xdl_linker_load(filename);
   if (NULL == linker_handle) return NULL;
 
   // find
-  xdl_t *self = xdl_find(filename);
+  xdl_t *self = xdl_find(filename, target_pid);
   if (NULL == self)
     dlclose(linker_handle);
   else
@@ -510,9 +518,9 @@ static void *xdl_open_always_force(const char *filename) {
   return (void *)self;
 }
 
-static void *xdl_open_try_force(const char *filename) {
+static void *xdl_open_try_force(const char *filename, int target_pid) {
   // find
-  xdl_t *self = xdl_find(filename);
+  xdl_t *self = xdl_find(filename, target_pid);
   if (NULL != self) return (void *)self;
 
   // try force dlopen()
@@ -520,7 +528,7 @@ static void *xdl_open_try_force(const char *filename) {
   if (NULL == linker_handle) return NULL;
 
   // find again
-  self = xdl_find(filename);
+  self = xdl_find(filename, target_pid);
   if (NULL == self)
     dlclose(linker_handle);
   else
@@ -529,15 +537,15 @@ static void *xdl_open_try_force(const char *filename) {
   return (void *)self;
 }
 
-void *xdl_open(const char *filename, int flags) {
+void *xdl_open(const char *filename, int flags, int target_pid) {
   if (NULL == filename) return NULL;
 
   if (flags & XDL_ALWAYS_FORCE_LOAD)
-    return xdl_open_always_force(filename);
+    return xdl_open_always_force(filename, target_pid);
   else if (flags & XDL_TRY_FORCE_LOAD)
-    return xdl_open_try_force(filename);
+    return xdl_open_try_force(filename, target_pid);
   else
-    return xdl_find(filename);
+    return xdl_find(filename, target_pid);
 }
 
 void *xdl_close(void *handle) {
@@ -723,7 +731,7 @@ static void *xdl_open_by_addr(void *addr) {
   if (NULL == addr) return NULL;
 
   xdl_t *self = NULL;
-  uintptr_t pkg[2] = {(uintptr_t)&self, (uintptr_t)addr};
+  uintptr_t pkg[3] = {(uintptr_t)&self, (uintptr_t)addr, (uintptr_t)0};
   xdl_iterate_phdr(xdl_open_by_addr_iterate_cb, pkg, XDL_DEFAULT);
 
   return (void *)self;
@@ -845,6 +853,7 @@ void xdl_addr_clean(void **cache) {
   }
   *cache = NULL;
 }
+
 
 int xdl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void *), void *data, int flags) {
   if (NULL == callback) return 0;

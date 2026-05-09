@@ -66,7 +66,7 @@ static void xdl_linker_init(void) {
   if (inited) return;
   inited = true;
 
-  void *handle = xdl_open(XDL_UTIL_LINKER_BASENAME, XDL_DEFAULT);
+  void *handle = xdl_open(XDL_UTIL_LINKER_BASENAME, XDL_DEFAULT, 0);
   if (NULL == handle) return;
 
   int api_level = xdl_util_get_api_level();
